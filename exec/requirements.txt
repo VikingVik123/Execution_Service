@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+sqlmodel
+httpx
+ccxt
+python-dotenv
+dotenv
