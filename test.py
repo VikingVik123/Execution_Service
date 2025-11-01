@@ -4,8 +4,8 @@ import ccxt
 class SampExec:
     def __init__(self):
         self.exchange = ccxt.bybit({
-            "apiKey": "nDgHWYiLi66wsoCs4V",
-            "secret": "cTHqwR68tLRdmpoMWpIAdvb8mrZJMJLUwixI",
+            "apiKey": "",
+            "secret": "",
             "options": {
                 "defaultType": "linear",
             },
