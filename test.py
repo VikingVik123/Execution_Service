@@ -1,67 +1,54 @@
 import ccxt
-import os
-import sys
-import time # Import time for the fetch_order delay
-from dotenv import load_dotenv
 
-load_dotenv()
 
-class SignalService:
+class SampExec:
     def __init__(self):
-        # You must create a .env file with these new variable names
-        self.API_TESTNET_KEY = os.getenv("API_TESTNET_KEY")
-        self.API_TESTNET_SECRET = os.getenv("API_TESTNET_SECRET")
-
-        print(f"Key: {self.API_TESTNET_KEY[:4]}...{self.API_TESTNET_KEY[-4:]}")
-        # --- THIS IS THE BYBIT CONFIG ---
-        self.exchange = ccxt.bybit(
-            {
-                "apiKey": self.API_TESTNET_KEY.strip(),
-                "secret": self.API_TESTNET_SECRET.strip(),
-                "options": {
-                    # This tells ccxt to use Futures (e.g., USDT-M)
-                    "defaultType": "linear", 
-                },
-                "urls": {
+        self.exchange = ccxt.bybit({
+            "apiKey": "nDgHWYiLi66wsoCs4V",
+            "secret": "cTHqwR68tLRdmpoMWpIAdvb8mrZJMJLUwixI",
+            "options": {
+                "defaultType": "linear",
+            },
+            "urls": {
                     "api": {
                         "public": "https://api-testnet.bybit.com",
                         "private": "https://api-testnet.bybit.com",
                     }
                 },
-            }
-        )
+                #"verbose": True
+        })
+        self.exchange.load_markets()
 
-        try:
-            # Load markets to get symbol precision for amount
-            self.exchange.load_markets()
-        except Exception as e:
-            print(f"CRITICAL ERROR: Failed to load markets: {e}", file=sys.stderr)
-
-    # --- MODIFIED to accept sl and tp ---
     def place_order(self, symbol: str, side: str, type:str, entry: float, sl: float, tp: float):
-        """
-        Place a FUTURES order on Bybit and then fetch the full order details.
-        """
+        print("--- Received signal ---")
+        print(f"Symbol: {symbol}, Side: {side}, Type: {type}, Entry: {entry}, SL: {sl}, TP: {tp}"),
         symbol_ccxt = symbol.upper()
-        
-        type_ccxt = type.lower().title() # 'market' -> 'Market'
-        side_ccxt = side.lower().title() # 'buy' -> 'Buy'
+        amount_float = 1 / entry
 
-        amount_float = 1 / entry 
         order_params = {
             "symbol": symbol_ccxt,
-            "type": type_ccxt,
-            "side": side_ccxt,
+            "type": type,
+            "side": side,
             "amount": amount_float, # Pass the float directly
-            "params": {} # Empty params, no 'category' needed
+            "params": {}
         }
 
-        # --- 1. Create the order ---
-        order_creation_response = self.exchange.create_order(**order_params)        
-        order_id = order_creation_response['id']
-        print(order_id)
-        return order_id
+        try:
+            order = self.exchange.create_order(**order_params)
+            #print(f"Order placed successfully: {order}")
+            order_id = order['id']          # <-- Bybit orderId
+            print({order_id})
+            return order_id 
+        except Exception as e:
+            print(f"Error placing order: {e}")
 
+    def balance(self):
+        balance = self.exchange.fetch_balance(
+            params = {"accountType": "UNIFIED"}
+        )
+        usdt_balance = balance.get('USDT', {})
+        return usdt_balance
+    
     def close_position(self, symbol: str):
         symbol_ccxt = symbol.upper()
         try:
@@ -96,3 +83,11 @@ class SignalService:
         except Exception as e:
             print(f"Error fetching positions: {e}")
             return None
+
+
+if __name__ == "__main__":
+    samp_exec = SampExec()
+    samp_exec.place_order("DOGEUSDT", "Sell", "Market", 0.16240, 0.15240, 0.17240)
+    #balance = samp_exec.balance()
+    #print(balance)
+    #samp_exec.close_position("DOGEUSDT")

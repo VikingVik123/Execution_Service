@@ -10,3 +10,9 @@ class SignalSchema(BaseModel):
     entry: float
     sl: float
     tp: float
+
+class CloseSignalSchema(BaseModel):
+    """
+    Schema for close signal data.
+    """
+    symbol: str
