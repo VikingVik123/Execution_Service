@@ -9,25 +9,27 @@ load_dotenv()
 class SignalService:
     def __init__(self):
         # You must create a .env file with these new variable names
-        self.API_TESTNET_KEY = os.getenv("API_TESTNET_KEY")
-        self.API_TESTNET_SECRET = os.getenv("API_TESTNET_SECRET")
+        self.API_KEY = os.getenv("API_KEY")
+        self.API_SECRET = os.getenv("API_SECRET")
 
-        print(f"Key: {self.API_TESTNET_KEY[:4]}...{self.API_TESTNET_KEY[-4:]}")
+        print(f"Key: {self.API_KEY[:4]}...{self.API_KEY[-4:]}")
         # --- THIS IS THE BYBIT CONFIG ---
         self.exchange = ccxt.bybit(
             {
-                "apiKey": self.API_TESTNET_KEY.strip(),
-                "secret": self.API_TESTNET_SECRET.strip(),
+                "apiKey": self.API_KEY.strip(),
+                "secret": self.API_SECRET.strip(),
                 "options": {
                     # This tells ccxt to use Futures (e.g., USDT-M)
                     "defaultType": "linear", 
                 },
-                "urls": {
-                    "api": {
-                        "public": "https://api-testnet.bybit.com",
-                        "private": "https://api-testnet.bybit.com",
-                    }
-                },
+                
+                #"urls": {
+                #    "api": {
+                #        "public": "https://api-testnet.bybit.com",
+                #        "private": "https://api-testnet.bybit.com",
+                #    }
+                #},
+                "enableRateLimit": True,
             }
         )
 
@@ -46,6 +48,18 @@ class SignalService:
         
         type_ccxt = type.lower().title() # 'market' -> 'Market'
         side_ccxt = side.lower().title() # 'buy' -> 'Buy'
+        positions = self.exchange.fetch_positions([symbol_ccxt])
+        open_position = next(
+            (
+                pos for pos in positions
+                if float(pos.get("contracts", 0)) > 0 or abs(float(pos.get("positionAmt", 0))) > 0
+            ),
+            None
+        )
+
+        if open_position:
+            print(f"⚠️ Skipping order: There is already an open position on {symbol_ccxt}")
+            return None
 
         amount_float = 1 / entry 
         order_params = {
