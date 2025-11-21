@@ -61,7 +61,7 @@ class SignalService:
             print(f"⚠️ Skipping order: There is already an open position on {symbol_ccxt}")
             return None
 
-        amount_float = 4 / entry 
+        amount_float = 30 / entry 
         order_params = {
             "symbol": symbol_ccxt,
             "type": type_ccxt,
