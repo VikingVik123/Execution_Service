@@ -1,58 +1,65 @@
 from fastapi import APIRouter, HTTPException
 from services.signal_service import SignalService
 from schemas.signal_schema import SignalSchema, CloseSignalSchema
-import ccxt  # <-- Import ccxt here
+import ccxt  # Required for exception handling
 
 router = APIRouter()
 signal_service = SignalService()
 
+
 @router.post("/signals")
 async def create_signal(signal: SignalSchema):
-    # --- ADD THIS ERROR HANDLING ---
+    """
+    Place a limit order with TP/SL via SignalService.
+    """
     try:
-        order = signal_service.place_order(
+        order_id = signal_service.place_order(
             symbol=signal.symbol,
             side=signal.side,
-            type=signal.type,
             entry=signal.entry,
             tp=signal.tp,
-            sl=signal.sl
+            sl=signal.sl,
+            margin=signal.margin,
+            leverage=signal.leverage
         )
-        return order
-    
+        if not order_id:
+            raise HTTPException(status_code=400, detail="Order could not be placed (check existing positions or parameters).")
+        return {"order_id": order_id}
+
     except ccxt.InsufficientFunds as e:
         raise HTTPException(status_code=400, detail=f"Insufficient Funds: {e}")
 
     except ccxt.InvalidOrder as e:
-        # This catches "order size too small", "invalid symbol", etc.
         raise HTTPException(status_code=400, detail=f"Invalid Order: {e}")
 
     except ccxt.NetworkError as e:
         raise HTTPException(status_code=504, detail=f"Network Error: {e}")
-    
+
     except ccxt.ExchangeError as e:
-        # This is the most common one!
         raise HTTPException(status_code=400, detail=f"Bybit Exchange Error: {e}")
-    
 
     except Exception as e:
-        # Catch any other error (like the TypeError or other bugs)
-        print(f"--- An unexpected internal error occurred: {repr(e)} ---")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {repr(e)}")
-    
+        print(f"--- Unexpected internal error: {repr(e)} ---")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {repr(e)}")
+
 
 @router.post("/close")
 async def close_position(signal: CloseSignalSchema):
+    """
+    Close any open position for a given symbol.
+    """
     try:
         result = signal_service.close_position(symbol=signal.symbol)
-        return result
+        if not result:
+            raise HTTPException(status_code=400, detail="No open position to close.")
+        return {"close_order_id": result}
 
     except ccxt.NetworkError as e:
         raise HTTPException(status_code=504, detail=f"Network Error: {e}")
-    
+
     except ccxt.ExchangeError as e:
         raise HTTPException(status_code=400, detail=f"Bybit Exchange Error: {e}")
 
     except Exception as e:
-        print(f"--- An unexpected internal error occurred: {repr(e)} ---")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {repr(e)}")
+        print(f"--- Unexpected internal error: {repr(e)} ---")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {repr(e)}")

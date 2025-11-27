@@ -1,112 +1,204 @@
-import ccxt
 import os
 import sys
-import time # Import time for the fetch_order delay
+import time
+import math
+import ccxt
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class SignalService:
     def __init__(self):
-        # You must create a .env file with these new variable names
         self.API_KEY = os.getenv("API_KEY")
         self.API_SECRET = os.getenv("API_SECRET")
 
-        print(f"Key: {self.API_KEY[:4]}...{self.API_KEY[-4:]}")
-        # --- THIS IS THE BYBIT CONFIG ---
-        self.exchange = ccxt.bybit(
-            {
-                "apiKey": self.API_KEY.strip(),
-                "secret": self.API_SECRET.strip(),
-                "options": {
-                    # This tells ccxt to use Futures (e.g., USDT-M)
-                    "defaultType": "linear", 
-                },
-                
-                #"urls": {
-                #    "api": {
-                #        "public": "https://api-testnet.bybit.com",
-                #        "private": "https://api-testnet.bybit.com",
-                #    }
-                #},
-                "enableRateLimit": True,
-            }
-        )
+        self.exchange = ccxt.bybit({
+            "apiKey": (self.API_KEY or "").strip(),
+            "secret": (self.API_SECRET or "").strip(),
+            "options": {"defaultType": "linear"},
+            "enableRateLimit": True,
+        })
 
         try:
-            # Load markets to get symbol precision for amount
             self.exchange.load_markets()
         except Exception as e:
-            print(f"CRITICAL ERROR: Failed to load markets: {e}", file=sys.stderr)
+            print(f"CRITICAL ERROR loading markets: {e}", file=sys.stderr)
 
-    # --- MODIFIED to accept sl and tp ---
-    def place_order(self, symbol: str, side: str, type:str, entry: float, sl: float, tp: float):
-        """
-        Place a FUTURES order on Bybit and then fetch the full order details.
-        """
+    # -----------------------------
+    # Set leverage
+    # -----------------------------
+    def set_leverage(self, symbol: str, leverage: int = 10):
         symbol_ccxt = symbol.upper()
-        
-        type_ccxt = type.lower().title() # 'market' -> 'Market'
-        side_ccxt = side.lower().title() # 'buy' -> 'Buy'
-        positions = self.exchange.fetch_positions([symbol_ccxt])
-        open_position = next(
-            (
-                pos for pos in positions
-                if float(pos.get("contracts", 0)) > 0 or abs(float(pos.get("positionAmt", 0))) > 0
-            ),
-            None
-        )
+        try:
+            self.exchange.privatePostV5PositionSetLeverage({
+                "category": "linear",
+                "symbol": symbol_ccxt,
+                "buyLeverage": str(leverage),
+                "sellLeverage": str(leverage),
+            })
+            print(f"✅ Leverage set to {leverage}x for {symbol_ccxt}")
+        except Exception as e:
+            # Bybit returns an error when leverage is already set — safe to continue
+            print(f"❌ Failed to set leverage (can be ignored if already set): {e}")
 
-        if open_position:
-            print(f"⚠️ Skipping order: There is already an open position on {symbol_ccxt}")
+    # -----------------------------
+    # Place limit order with TP/SL
+    # -----------------------------
+    def place_order(self, symbol: str, side: str, entry: float,
+                    tp: float, sl: float, margin: float = 30, leverage: int = 10):
+        """
+        - Places a Limit order via Bybit v5 (ccxt privatePost wrapper)
+        - Immediately creates reduce-only TP and SL conditional orders (tpslOrder)
+          so they are attached to the order/position without waiting for fill.
+        - Returns the main order id (or raw response) on success, or None on failure.
+        """
+
+        # Basic validation
+        if not symbol or not side:
+            print("❌ symbol and side are required.")
             return None
 
-        amount_float = 30 / entry 
-        order_params = {
-            "symbol": symbol_ccxt,
-            "type": type_ccxt,
-            "side": side_ccxt,
-            "amount": amount_float, # Pass the float directly
-            "params": {} # Empty params, no 'category' needed
-        }
+        symbol_ccxt = symbol.upper()  # e.g., "DOGEUSDT"
+        if side.lower() not in ("buy", "sell"):
+            print(f"❌ Invalid side '{side}'. Use 'buy' or 'sell'.")
+            return None
+        # Bybit v5 expects "Buy" or "Sell" in the v5 order/create payload
+        side_bybit = "Buy" if side.lower() == "buy" else "Sell"
+        close_side = "Sell" if side_bybit == "Buy" else "Buy"  # side for TP/SL orders
 
-        # --- 1. Create the order ---
-        order_creation_response = self.exchange.create_order(**order_params)        
-        order_id = order_creation_response['id']
-        print(order_id)
+        # 1️⃣ Set leverage (best-effort)
+        self.set_leverage(symbol_ccxt, leverage)
+
+        # 2️⃣ Prevent opening duplicate positions
+        try:
+            positions = self.exchange.fetch_positions([symbol_ccxt])
+        except Exception as e:
+            print(f"❌ Failed to fetch positions: {e}")
+            return None
+
+        open_position = next((p for p in positions if abs(float(p.get("contracts", 0))) > 0), None)
+        if open_position:
+            print(f"⚠️ Open position exists. Skipping order for {symbol_ccxt}.")
+            return None
+
+        # 3️⃣ Compute qty from margin * leverage and round down to integer contracts
+        notional = float(margin) * int(leverage)   # USDT notional
+        if entry <= 0:
+            print("❌ Invalid entry price.")
+            return None
+
+        raw_amount = notional / float(entry)       # theoretical base-asset qty (e.g., DOGE)
+        # Floor to integer qty for small-alts on Bybit (adjust if instrument supports fraction)
+        qty = math.floor(raw_amount)
+        if qty <= 0:
+            print(f"❌ Computed qty is zero or negative (raw={raw_amount}). Increase margin or adjust entry.")
+            return None
+
+        print(f"📌 Placing {side_bybit} Limit order: {qty} {symbol_ccxt.replace('USDT','')} @ {entry} (notional ≈ {notional} USDT)")
+
+        # 4️⃣ Place main limit order via v5 order/create using CCXT private POST wrapper
+        try:
+            payload = {
+                "category": "linear",
+                "symbol": symbol_ccxt,
+                "side": side_bybit,
+                "orderType": "Limit",
+                "qty": str(qty),
+                "price": str(entry),
+                "timeInForce": "GTC",
+                "reduceOnly": False,
+            }
+            resp = self.exchange.privatePostV5OrderCreate(payload)
+            # Typical successful response structure:
+            # { "retCode":0, "retMsg":"OK", "result": {"orderId": "...", ... }, ... }
+            order_id = None
+            if isinstance(resp, dict):
+                result = resp.get("result")
+                if isinstance(result, dict):
+                    order_id = result.get("orderId") or result.get("order_id") or result.get("orderLinkId")
+            print(f"✅ Main order placed. Raw response: {resp}")
+            if not order_id:
+                # return raw response so caller can inspect
+                return resp
+        except Exception as e:
+            print(f"❌ Failed to place main order: {e}")
+            return None
+
+        # 5️⃣ Create reduce-only TP and SL conditional orders (tpslOrder)
+        # These use create_order so CCXT will format properly; include Bybit-specific params.
+        try:
+            # TAKE PROFIT
+            tp_order = self.exchange.create_order(
+                symbol=symbol_ccxt,
+                type="limit",
+                side=close_side,
+                amount=qty,
+                price=str(tp),
+                params={
+                    "category": "linear",
+                    "reduceOnly": True,
+                    "triggerDirection": 1 if side_bybit == "Buy" else 2,
+                    "triggerPrice": str(tp),
+                    "orderFilter": "tpslOrder",
+                    "tpslOrderType": "tp",
+                    # optional: "positionIdx": 0
+                }
+            )
+            print(f"✅ TP set @ {tp} (raw: {tp_order})")
+        except Exception as e:
+            print(f"⚠️ Failed to place TP conditional order: {e}")
+
+        try:
+            # STOP LOSS
+            sl_order = self.exchange.create_order(
+                symbol=symbol_ccxt,
+                type="limit",
+                side=close_side,
+                amount=qty,
+                price=str(sl),
+                params={
+                    "category": "linear",
+                    "reduceOnly": True,
+                    "triggerDirection": 2 if side_bybit == "Buy" else 1,
+                    "triggerPrice": str(sl),
+                    "orderFilter": "tpslOrder",
+                    "tpslOrderType": "sl",
+                    # optional: "positionIdx": 0
+                }
+            )
+            print(f"✅ SL set @ {sl} (raw: {sl_order})")
+        except Exception as e:
+            print(f"⚠️ Failed to place SL conditional order: {e}")
+
+        # Return the main order id
         return order_id
 
+    # -----------------------------
+    # Close any open position
+    # -----------------------------
     def close_position(self, symbol: str):
         symbol_ccxt = symbol.upper()
         try:
             positions = self.exchange.fetch_positions([symbol_ccxt])
-            #print(positions)
-            pos = None
-            for p in positions:
-                if p['contracts'] != 0 and p['symbol'].startswith(f"{symbol_ccxt.replace('USDT', '/USDT')}:"):
-                    pos = p
-                    break
-
+            pos = next((p for p in positions if abs(p["contracts"]) > 0), None)
             if not pos:
-                print(f"No open position for {symbol_ccxt}")
+                print("No open position.")
                 return None
-            
-            size   = abs(pos['contracts'])          # e.g. 6.0
-            side   = pos['side']                    # 'long' or 'short'
-            close_side = 'sell' if side == 'long' else 'buy'
 
-            print(f"Closing {side.upper()} position: {size} contracts @ market")
-            # 2. Place reduce-only market order
+            size = abs(pos["contracts"])
+            side = pos["side"]
+            close_side = "sell" if side == "long" else "buy"
+
             close_order = self.exchange.create_order(
                 symbol=symbol_ccxt,
-                type='market',
+                type="market",
                 side=close_side,
                 amount=size,
-                params={'reduceOnly': True}
+                params={"reduceOnly": True}
             )
-            close_id = close_order['id']
-            print(f"Position closed → Order ID: {close_id}")
-            return close_id
+            print(f"✅ Closed {side.upper()} size={size}. ID={close_order.get('id') or close_order}")
+            return close_order.get("id") if isinstance(close_order, dict) and close_order.get("id") else close_order
+
         except Exception as e:
-            print(f"Error fetching positions: {e}")
+            print(f"❌ Failed to close position: {e}")
             return None
